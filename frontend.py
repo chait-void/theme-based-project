@@ -737,32 +737,51 @@ class ImageEncryptionApp:
 
     def show_image_preview(self, image_path):
         """Display image preview"""
+        print(f"DEBUG: show_image_preview called with {image_path}")
         try:
             img = Image.open(image_path)
+            print(f"DEBUG: Image opened, size: {img.size}, mode: {img.mode}")
             img.thumbnail((300, 300))
+            print(f"DEBUG: Thumbnail created, size: {img.size}")
+            img = img.convert("RGB")  # Ensure RGB mode for Tkinter compatibility
             photo = ImageTk.PhotoImage(img)
+            print(f"DEBUG: PhotoImage created")
             self.original_preview_image = photo
             self.original_image_label.config(image=photo, text="")
+            self.root.update()
+            print(f"DEBUG: Label configured")
         except Exception as exc:
+            print(f"DEBUG: Exception in show_image_preview: {exc}")
             self.original_image_label.config(text=f"Error loading image:\n{exc}")
 
     def show_encrypted_placeholder(self):
         """Show a placeholder preview for encrypted output"""
+        print("DEBUG: show_encrypted_placeholder called")
         placeholder = Image.new("RGB", (300, 300), (240, 240, 240))
         photo = ImageTk.PhotoImage(placeholder)
         self.result_preview_image = photo
         self.result_image_label.config(image=photo, text="Encrypted data saved", compound=tk.CENTER)
+        self.root.update()
+        print("DEBUG: Placeholder configured")
 
     def show_decrypted_preview(self, image_bytes):
         """Display decrypted image preview from bytes"""
+        print(f"DEBUG: show_decrypted_preview called with {len(image_bytes)} bytes")
         try:
             stream = io.BytesIO(image_bytes)
             img = Image.open(stream)
+            print(f"DEBUG: Image from bytes opened, size: {img.size}, mode: {img.mode}")
             img.thumbnail((300, 300))
+            print(f"DEBUG: Thumbnail created, size: {img.size}")
+            img = img.convert("RGB")  # Ensure RGB mode for Tkinter compatibility
             photo = ImageTk.PhotoImage(img)
+            print(f"DEBUG: PhotoImage created")
             self.result_preview_image = photo
             self.result_image_label.config(image=photo, text="")
+            self.root.update()
+            print(f"DEBUG: Label configured")
         except Exception as exc:
+            print(f"DEBUG: Exception in show_decrypted_preview: {exc}")
             self.result_image_label.config(text=f"Decryption succeeded but preview failed:\n{exc}")
 
     # ==================== GALLERY FUNCTIONS ====================
