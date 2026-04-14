@@ -9,18 +9,23 @@ from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 import os
 import io
-import hashlib
 from datetime import datetime
 
-from backend import (
-    encrypt_image_bytes,
-    decrypt_image_bytes,
-    init_database,
-    save_encrypted_image_to_database,
-    list_encrypted_images,
-    load_encrypted_image,
-    delete_encrypted_image,
-)
+try:
+    from backend import (
+        encrypt_image_bytes,
+        decrypt_image_bytes,
+        init_database,
+        save_encrypted_image_to_database,
+        list_encrypted_images,
+        load_encrypted_image,
+        delete_encrypted_image,
+    )
+    BACKEND_AVAILABLE = True
+    backend_import_error = None
+except ImportError as exc:
+    BACKEND_AVAILABLE = False
+    backend_import_error = exc
 
 class ImageEncryptionApp:
     def __init__(self, root):
@@ -33,12 +38,15 @@ class ImageEncryptionApp:
         self.selected_file_path = None
         self.selected_gallery_id = None
         self.encrypted_data = None
+        self.original_preview_image = None
+        self.result_preview_image = None
         self.is_locked_out = False
         self.failed_attempts = 0
         self.lockout_time_remaining = 0
         
         self.db_path = self.get_database_path()
-        init_database(self.db_path)
+        if BACKEND_AVAILABLE:
+            init_database(self.db_path)
         
         # Create main UI
         self.create_header()
@@ -573,9 +581,9 @@ class ImageEncryptionApp:
 
     def perform_encryption(self):
         """Perform actual encryption and save result"""
-        if not CRYPTO_AVAILABLE:
-            messagebox.showerror("Missing Dependency", "The cryptography package is not installed.\nInstall it with: pip install cryptography")
-            self.update_status("Encryption failed: missing cryptography")
+        if not BACKEND_AVAILABLE:
+            messagebox.showerror("Missing Dependency", f"Backend module could not be imported:\n{backend_import_error}")
+            self.update_status("Encryption failed: backend unavailable")
             return
 
         self.update_status("Encrypting image...")
@@ -588,9 +596,7 @@ class ImageEncryptionApp:
             return
 
         try:
-            key = self.derive_key_from_password(self.password_var.get())
-            fernet = Fernet(key)
-            encrypted_bytes = fernet.encrypt(file_bytes)
+            encrypted_bytes = encrypt_image_bytes(file_bytes, self.password_var.get())
         except Exception as exc:
             messagebox.showerror("Error", f"Encryption failed:\n{exc}")
             self.update_status("Encryption failed")
@@ -599,14 +605,18 @@ class ImageEncryptionApp:
         filename = os.path.basename(self.selected_file_path)
         file_format = filename.split('.')[-1].upper()
         file_size = os.path.getsize(self.selected_file_path)
-        file_hash = hashlib.sha256(file_bytes).hexdigest()
-        encrypted_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tags = ""
 
         if self.save_location_var.get() == "database":
             try:
-                self.save_encrypted_to_database(
-                    filename, file_format, file_size, encrypted_date, file_hash, tags, encrypted_bytes
+                save_encrypted_image_to_database(
+                    filename,
+                    file_format,
+                    file_size,
+                    encrypted_bytes,
+                    self.password_var.get(),
+                    tags,
+                    self.db_path,
                 )
                 self.load_gallery_data()
                 messagebox.showinfo("Success", "Encryption successful!\n\nEncrypted image saved to database.\nView it in the Gallery tab.")
@@ -629,20 +639,17 @@ class ImageEncryptionApp:
 
     def perform_decryption(self):
         """Perform decryption from database or file"""
-        if not CRYPTO_AVAILABLE:
-            messagebox.showerror("Missing Dependency", "The cryptography package is not installed.\nInstall it with: pip install cryptography")
-            self.update_status("Decryption failed: missing cryptography")
+        if not BACKEND_AVAILABLE:
+            messagebox.showerror("Missing Dependency", f"Backend module could not be imported:\n{backend_import_error}")
+            self.update_status("Decryption failed: backend unavailable")
             return
 
         self.update_status("Attempting decryption...")
-        password = self.password_var.get()
-        key = self.derive_key_from_password(password)
-        fernet = Fernet(key)
 
         encrypted_bytes = None
 
         if self.selected_gallery_id is not None:
-            row = self.load_gallery_row(self.selected_gallery_id)
+            row = load_encrypted_image(self.db_path, self.selected_gallery_id)
             if row is None:
                 messagebox.showerror("Error", "Selected gallery item could not be loaded.")
                 self.update_status("Decryption failed: gallery load error")
@@ -658,7 +665,7 @@ class ImageEncryptionApp:
                 return
 
         try:
-            decrypted_bytes = fernet.decrypt(encrypted_bytes)
+            decrypted_bytes = decrypt_image_bytes(encrypted_bytes, self.password_var.get())
         except InvalidToken:
             self.failed_attempts += 1
             remaining = max(0, 3 - self.failed_attempts)
@@ -670,6 +677,12 @@ class ImageEncryptionApp:
                 self.update_status(f"Decryption failed - {remaining} attempts remaining")
             return
         except Exception as exc:
+            self.failed_attempts += 1
+            remaining = max(0, 3 - self.failed_attempts)
+            if self.failed_attempts >= 3:
+                self.trigger_lockout()
+            else:
+                self.attempts_label.config(text=f"⚠️ Attempts remaining: {remaining}")
             messagebox.showerror("Error", f"Decryption failed:\n{exc}")
             self.update_status("Decryption failed")
             return
@@ -714,6 +727,8 @@ class ImageEncryptionApp:
         """Reset the form"""
         self.selected_file_path = None
         self.selected_gallery_id = None
+        self.original_preview_image = None
+        self.result_preview_image = None
         self.file_path_var.set("No file selected")
         self.password_var.set("")
         self.original_image_label.config(image="", text="No image loaded")
@@ -726,8 +741,8 @@ class ImageEncryptionApp:
             img = Image.open(image_path)
             img.thumbnail((300, 300))
             photo = ImageTk.PhotoImage(img)
+            self.original_preview_image = photo
             self.original_image_label.config(image=photo, text="")
-            self.original_image_label.image = photo
         except Exception as exc:
             self.original_image_label.config(text=f"Error loading image:\n{exc}")
 
@@ -735,8 +750,8 @@ class ImageEncryptionApp:
         """Show a placeholder preview for encrypted output"""
         placeholder = Image.new("RGB", (300, 300), (240, 240, 240))
         photo = ImageTk.PhotoImage(placeholder)
+        self.result_preview_image = photo
         self.result_image_label.config(image=photo, text="Encrypted data saved", compound=tk.CENTER)
-        self.result_image_label.image = photo
 
     def show_decrypted_preview(self, image_bytes):
         """Display decrypted image preview from bytes"""
@@ -745,8 +760,8 @@ class ImageEncryptionApp:
             img = Image.open(stream)
             img.thumbnail((300, 300))
             photo = ImageTk.PhotoImage(img)
+            self.result_preview_image = photo
             self.result_image_label.config(image=photo, text="")
-            self.result_image_label.image = photo
         except Exception as exc:
             self.result_image_label.config(text=f"Decryption succeeded but preview failed:\n{exc}")
 
@@ -754,47 +769,6 @@ class ImageEncryptionApp:
 
     def get_database_path(self):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), "imageshield.db")
-
-    def init_database(self):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            """
-            CREATE TABLE IF NOT EXISTS images (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                filename TEXT NOT NULL,
-                format TEXT,
-                size INTEGER,
-                encrypted_at TEXT,
-                file_hash TEXT,
-                tags TEXT,
-                data BLOB
-            )
-            """
-        )
-        conn.commit()
-        conn.close()
-
-    def derive_key_from_password(self, password: str) -> bytes:
-        salt = b"ImageShieldSalt2026"
-        kdf = PBKDF2HMAC(
-            algorithm=hashes.SHA256(),
-            length=32,
-            salt=salt,
-            iterations=390000,
-            backend=default_backend()
-        )
-        return base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
-
-    def save_encrypted_to_database(self, filename, file_format, file_size, encrypted_at, file_hash, tags, encrypted_bytes):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO images (filename, format, size, encrypted_at, file_hash, tags, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (filename, file_format, file_size, encrypted_at, file_hash, tags, sqlite3.Binary(encrypted_bytes))
-        )
-        conn.commit()
-        conn.close()
 
     def save_encrypted_to_file(self, filename, encrypted_bytes):
         base_name = os.path.splitext(filename)[0]
@@ -805,20 +779,8 @@ class ImageEncryptionApp:
         return save_path
 
     def load_gallery_data(self):
-        search_term = self.search_var.get().strip().lower()
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        if search_term:
-            cursor.execute(
-                "SELECT id, filename, format, size, encrypted_at, tags FROM images WHERE lower(filename) LIKE ? OR lower(tags) LIKE ? ORDER BY encrypted_at DESC",
-                (f"%{search_term}%", f"%{search_term}%")
-            )
-        else:
-            cursor.execute(
-                "SELECT id, filename, format, size, encrypted_at, tags FROM images ORDER BY encrypted_at DESC"
-            )
-        rows = cursor.fetchall()
-        conn.close()
+        search_term = self.search_var.get().strip()
+        rows = list_encrypted_images(self.db_path, search_term if search_term else None)
 
         for item in self.gallery_tree.get_children():
             self.gallery_tree.delete(item)
@@ -828,12 +790,7 @@ class ImageEncryptionApp:
             self.gallery_tree.insert("", tk.END, iid=str(row[0]), values=(row[1], row[2], size_display, row[4], row[5] or ""))
 
     def load_gallery_row(self, item_id):
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, filename, format, size, encrypted_at, tags, data FROM images WHERE id = ?", (item_id,))
-        row = cursor.fetchone()
-        conn.close()
-        return row
+        return load_encrypted_image(self.db_path, item_id)
 
     def refresh_gallery(self):
         self.search_var.set("")
@@ -890,11 +847,7 @@ class ImageEncryptionApp:
             f"Are you sure you want to delete '{filename}' from the database?\n\nThis action cannot be undone!"
         )
         if confirm:
-            conn = sqlite3.connect(self.db_path)
-            cursor = conn.cursor()
-            cursor.execute("DELETE FROM images WHERE id = ?", (item_id,))
-            conn.commit()
-            conn.close()
+            delete_encrypted_image(self.db_path, item_id)
             self.refresh_gallery()
             self.update_status(f"Deleted: {filename}")
             messagebox.showinfo("Deleted", f"'{filename}' has been removed from the gallery.")
