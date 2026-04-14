@@ -8,7 +8,19 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
 import os
+import io
+import hashlib
 from datetime import datetime
+
+from backend import (
+    encrypt_image_bytes,
+    decrypt_image_bytes,
+    init_database,
+    save_encrypted_image_to_database,
+    list_encrypted_images,
+    load_encrypted_image,
+    delete_encrypted_image,
+)
 
 class ImageEncryptionApp:
     def __init__(self, root):
@@ -19,10 +31,14 @@ class ImageEncryptionApp:
         
         # State variables
         self.selected_file_path = None
+        self.selected_gallery_id = None
         self.encrypted_data = None
         self.is_locked_out = False
         self.failed_attempts = 0
         self.lockout_time_remaining = 0
+        
+        self.db_path = self.get_database_path()
+        init_database(self.db_path)
         
         # Create main UI
         self.create_header()
@@ -529,103 +545,155 @@ class ImageEncryptionApp:
     
     def execute_operation(self):
         """Execute encryption or decryption"""
-        # Validation
-        if not self.selected_file_path:
-            messagebox.showerror("Error", "Please select a file first!")
-            return
-        
+        if self.operation_var.get() == "encrypt":
+            if not self.selected_file_path:
+                messagebox.showerror("Error", "Please select an image file first!")
+                return
+        else:
+            if not self.selected_file_path and self.selected_gallery_id is None:
+                messagebox.showerror("Error", "Please select an encrypted file or gallery item first!")
+                return
+
         password = self.password_var.get()
         if not password:
             messagebox.showerror("Error", "Please enter a password!")
             return
-        
+
         if len(password) < 8:
             messagebox.showwarning("Warning", "Password should be at least 8 characters for better security!")
-        
-        # Check lockout status
+
         if self.is_locked_out:
             messagebox.showerror("Locked Out", f"Too many failed attempts. Try again in {self.lockout_time_remaining} seconds.")
             return
-        
-        # Execute operation
-        operation = self.operation_var.get()
-        
-        if operation == "encrypt":
+
+        if self.operation_var.get() == "encrypt":
             self.perform_encryption()
         else:
             self.perform_decryption()
-    
+
     def perform_encryption(self):
-        """Perform encryption (placeholder - connects to backend)"""
+        """Perform actual encryption and save result"""
+        if not CRYPTO_AVAILABLE:
+            messagebox.showerror("Missing Dependency", "The cryptography package is not installed.\nInstall it with: pip install cryptography")
+            self.update_status("Encryption failed: missing cryptography")
+            return
+
         self.update_status("Encrypting image...")
-        
-        # PLACEHOLDER: This is where you'd call your encryption backend
-        # For now, simulate success
-        
-        # Simulate encrypted noise preview
-        self.show_encrypted_noise_preview()
-        
-        # Show success message
-        save_location = self.save_location_var.get()
-        if save_location == "database":
-            message = "Encryption successful!\n\nEncrypted file saved to database.\nView it in the Gallery tab."
+        try:
+            with open(self.selected_file_path, "rb") as f:
+                file_bytes = f.read()
+        except Exception as exc:
+            messagebox.showerror("Error", f"Unable to read file:\n{exc}")
+            self.update_status("Encryption failed: could not read file")
+            return
+
+        try:
+            key = self.derive_key_from_password(self.password_var.get())
+            fernet = Fernet(key)
+            encrypted_bytes = fernet.encrypt(file_bytes)
+        except Exception as exc:
+            messagebox.showerror("Error", f"Encryption failed:\n{exc}")
+            self.update_status("Encryption failed")
+            return
+
+        filename = os.path.basename(self.selected_file_path)
+        file_format = filename.split('.')[-1].upper()
+        file_size = os.path.getsize(self.selected_file_path)
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
+        encrypted_date = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        tags = ""
+
+        if self.save_location_var.get() == "database":
+            try:
+                self.save_encrypted_to_database(
+                    filename, file_format, file_size, encrypted_date, file_hash, tags, encrypted_bytes
+                )
+                self.load_gallery_data()
+                messagebox.showinfo("Success", "Encryption successful!\n\nEncrypted image saved to database.\nView it in the Gallery tab.")
+                self.update_status("Encryption completed and saved to database")
+            except Exception as exc:
+                messagebox.showerror("Error", f"Failed to save encrypted image to database:\n{exc}")
+                self.update_status("Encryption failed: database save error")
+                return
         else:
-            message = "Encryption successful!\n\nEncrypted file saved as:\n" + self.selected_file_path.replace(".jpg", "_encrypted.enc").replace(".png", "_encrypted.enc")
-        
-        messagebox.showinfo("Success", message)
-        self.update_status("Encryption completed successfully")
-        
-        # Add to gallery if database option selected
-        if save_location == "database":
-            self.add_to_gallery_sample()
-    
+            try:
+                saved_path = self.save_encrypted_to_file(filename, encrypted_bytes)
+                messagebox.showinfo("Success", f"Encryption successful!\n\nEncrypted file saved as:\n{saved_path}")
+                self.update_status("Encryption completed and saved to file system")
+            except Exception as exc:
+                messagebox.showerror("Error", f"Failed to save encrypted file:\n{exc}")
+                self.update_status("Encryption failed: file save error")
+                return
+
+        self.show_encrypted_placeholder()
+
     def perform_decryption(self):
-        """Perform decryption (placeholder - connects to backend)"""
+        """Perform decryption from database or file"""
+        if not CRYPTO_AVAILABLE:
+            messagebox.showerror("Missing Dependency", "The cryptography package is not installed.\nInstall it with: pip install cryptography")
+            self.update_status("Decryption failed: missing cryptography")
+            return
+
         self.update_status("Attempting decryption...")
-        
-        # PLACEHOLDER: This is where you'd call your decryption backend
-        # Simulate success or failure based on random
-        
-        import random
-        success = random.choice([True, False])  # Simulate 50% success rate for demo
-        
-        if success:
-            # Reset failed attempts on success
-            self.failed_attempts = 0
-            self.attempts_label.config(text="")
-            
-            # Show decrypted image
-            self.show_decrypted_preview()
-            
-            messagebox.showinfo("Success", "Decryption successful!\n\nOriginal image restored.")
-            self.update_status("Decryption completed successfully")
+        password = self.password_var.get()
+        key = self.derive_key_from_password(password)
+        fernet = Fernet(key)
+
+        encrypted_bytes = None
+
+        if self.selected_gallery_id is not None:
+            row = self.load_gallery_row(self.selected_gallery_id)
+            if row is None:
+                messagebox.showerror("Error", "Selected gallery item could not be loaded.")
+                self.update_status("Decryption failed: gallery load error")
+                return
+            encrypted_bytes = row[6]
         else:
-            # Increment failed attempts
+            try:
+                with open(self.selected_file_path, "rb") as f:
+                    encrypted_bytes = f.read()
+            except Exception as exc:
+                messagebox.showerror("Error", f"Unable to read encrypted file:\n{exc}")
+                self.update_status("Decryption failed: could not read file")
+                return
+
+        try:
+            decrypted_bytes = fernet.decrypt(encrypted_bytes)
+        except InvalidToken:
             self.failed_attempts += 1
-            remaining = 3 - self.failed_attempts
-            
+            remaining = max(0, 3 - self.failed_attempts)
             if self.failed_attempts >= 3:
-                # Trigger lockout
                 self.trigger_lockout()
             else:
                 self.attempts_label.config(text=f"⚠️ Attempts remaining: {remaining}")
-                messagebox.showerror("Error", f"Invalid password!\n\nAttempts remaining: {remaining}")
+                messagebox.showerror("Error", f"Invalid password or corrupted file!\nAttempts remaining: {remaining}")
                 self.update_status(f"Decryption failed - {remaining} attempts remaining")
-    
+            return
+        except Exception as exc:
+            messagebox.showerror("Error", f"Decryption failed:\n{exc}")
+            self.update_status("Decryption failed")
+            return
+
+        self.failed_attempts = 0
+        self.attempts_label.config(text="")
+        self.show_decrypted_preview(decrypted_bytes)
+        messagebox.showinfo("Success", "Decryption successful!\n\nImage decrypted.")
+        self.update_status("Decryption completed successfully")
+
     def trigger_lockout(self):
         """Trigger 30-second lockout"""
         self.is_locked_out = True
         self.lockout_time_remaining = 30
         self.password_entry.config(state="disabled")
         self.execute_button.config(state="disabled")
-        
+
         self.update_lockout_timer()
-        
+
         messagebox.showerror(
             "Locked Out",
             "Too many failed attempts!\n\nYou are locked out for 30 seconds."
         )
-    
+
     def update_lockout_timer(self):
         """Update lockout countdown timer"""
         if self.lockout_time_remaining > 0:
@@ -635,23 +703,23 @@ class ImageEncryptionApp:
             self.lockout_time_remaining -= 1
             self.root.after(1000, self.update_lockout_timer)
         else:
-            # Lockout expired
             self.is_locked_out = False
             self.lockout_label.config(text="")
             self.attempts_label.config(text="⚠️ Attempts remaining: 1 (Next wrong attempt = immediate lockout)")
             self.password_entry.config(state="normal")
             self.execute_button.config(state="normal")
             self.update_status("Lockout expired - 1 attempt remaining")
-    
+
     def reset_form(self):
         """Reset the form"""
         self.selected_file_path = None
+        self.selected_gallery_id = None
         self.file_path_var.set("No file selected")
         self.password_var.set("")
         self.original_image_label.config(image="", text="No image loaded")
         self.result_image_label.config(image="", text="No result yet")
         self.update_status("Form reset")
-    
+
     def show_image_preview(self, image_path):
         """Display image preview"""
         try:
@@ -659,139 +727,187 @@ class ImageEncryptionApp:
             img.thumbnail((300, 300))
             photo = ImageTk.PhotoImage(img)
             self.original_image_label.config(image=photo, text="")
-            self.original_image_label.image = photo  # Keep reference
-        except Exception as e:
-            self.original_image_label.config(text=f"Error loading image:\n{str(e)}")
-    
-    def show_encrypted_noise_preview(self):
-        """Show encrypted noise visualization"""
-        # Create a noise image to simulate encrypted data
-        import numpy as np
-        
-        noise = np.random.randint(0, 256, (300, 300, 3), dtype=np.uint8)
-        noise_img = Image.fromarray(noise, 'RGB')
-        photo = ImageTk.PhotoImage(noise_img)
-        
-        self.result_image_label.config(image=photo, text="")
+            self.original_image_label.image = photo
+        except Exception as exc:
+            self.original_image_label.config(text=f"Error loading image:\n{exc}")
+
+    def show_encrypted_placeholder(self):
+        """Show a placeholder preview for encrypted output"""
+        placeholder = Image.new("RGB", (300, 300), (240, 240, 240))
+        photo = ImageTk.PhotoImage(placeholder)
+        self.result_image_label.config(image=photo, text="Encrypted data saved", compound=tk.CENTER)
         self.result_image_label.image = photo
-    
-    def show_decrypted_preview(self):
-        """Show decrypted image preview (uses original for demo)"""
-        if self.selected_file_path:
-            # For demo, just show a placeholder
-            self.result_image_label.config(text="✅ Decrypted image\n(Original restored)")
-    
+
+    def show_decrypted_preview(self, image_bytes):
+        """Display decrypted image preview from bytes"""
+        try:
+            stream = io.BytesIO(image_bytes)
+            img = Image.open(stream)
+            img.thumbnail((300, 300))
+            photo = ImageTk.PhotoImage(img)
+            self.result_image_label.config(image=photo, text="")
+            self.result_image_label.image = photo
+        except Exception as exc:
+            self.result_image_label.config(text=f"Decryption succeeded but preview failed:\n{exc}")
+
     # ==================== GALLERY FUNCTIONS ====================
-    
+
+    def get_database_path(self):
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), "imageshield.db")
+
+    def init_database(self):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            CREATE TABLE IF NOT EXISTS images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                filename TEXT NOT NULL,
+                format TEXT,
+                size INTEGER,
+                encrypted_at TEXT,
+                file_hash TEXT,
+                tags TEXT,
+                data BLOB
+            )
+            """
+        )
+        conn.commit()
+        conn.close()
+
+    def derive_key_from_password(self, password: str) -> bytes:
+        salt = b"ImageShieldSalt2026"
+        kdf = PBKDF2HMAC(
+            algorithm=hashes.SHA256(),
+            length=32,
+            salt=salt,
+            iterations=390000,
+            backend=default_backend()
+        )
+        return base64.urlsafe_b64encode(kdf.derive(password.encode("utf-8")))
+
+    def save_encrypted_to_database(self, filename, file_format, file_size, encrypted_at, file_hash, tags, encrypted_bytes):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO images (filename, format, size, encrypted_at, file_hash, tags, data) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (filename, file_format, file_size, encrypted_at, file_hash, tags, sqlite3.Binary(encrypted_bytes))
+        )
+        conn.commit()
+        conn.close()
+
+    def save_encrypted_to_file(self, filename, encrypted_bytes):
+        base_name = os.path.splitext(filename)[0]
+        save_name = f"{base_name}_encrypted.enc"
+        save_path = os.path.join(os.path.dirname(self.selected_file_path), save_name)
+        with open(save_path, "wb") as f:
+            f.write(encrypted_bytes)
+        return save_path
+
     def load_gallery_data(self):
-        """Load gallery data from database (placeholder)"""
-        # PLACEHOLDER: This would query the SQLite database
-        # For now, add sample data
-        
-        sample_data = [
-            ("vacation_photo.jpg", "JPG", "2.3 MB", "2026-04-10 15:30", "vacation, beach"),
-            ("document_scan.png", "PNG", "1.1 MB", "2026-04-09 10:20", "work, important"),
-            ("family_portrait.jpg", "JPG", "3.8 MB", "2026-04-08 20:00", "family, memories"),
-        ]
-        
-        for item in sample_data:
-            self.gallery_tree.insert("", tk.END, values=item)
-    
-    def refresh_gallery(self):
-        """Refresh gallery data"""
-        # Clear existing items
+        search_term = self.search_var.get().strip().lower()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if search_term:
+            cursor.execute(
+                "SELECT id, filename, format, size, encrypted_at, tags FROM images WHERE lower(filename) LIKE ? OR lower(tags) LIKE ? ORDER BY encrypted_at DESC",
+                (f"%{search_term}%", f"%{search_term}%")
+            )
+        else:
+            cursor.execute(
+                "SELECT id, filename, format, size, encrypted_at, tags FROM images ORDER BY encrypted_at DESC"
+            )
+        rows = cursor.fetchall()
+        conn.close()
+
         for item in self.gallery_tree.get_children():
             self.gallery_tree.delete(item)
-        
-        # Reload data
+
+        for row in rows:
+            size_display = self.format_file_size(row[3])
+            self.gallery_tree.insert("", tk.END, iid=str(row[0]), values=(row[1], row[2], size_display, row[4], row[5] or ""))
+
+    def load_gallery_row(self, item_id):
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, filename, format, size, encrypted_at, tags, data FROM images WHERE id = ?", (item_id,))
+        row = cursor.fetchone()
+        conn.close()
+        return row
+
+    def refresh_gallery(self):
+        self.search_var.set("")
         self.load_gallery_data()
         self.update_status("Gallery refreshed")
-    
+
     def search_gallery(self):
-        """Search gallery based on search term"""
-        search_term = self.search_var.get().lower()
-        
-        if not search_term:
-            self.refresh_gallery()
-            return
-        
-        # Clear and filter
-        for item in self.gallery_tree.get_children():
-            self.gallery_tree.delete(item)
-        
-        # Re-add matching items (placeholder logic)
-        self.load_gallery_data()  # In real app, would filter database query
-        self.update_status(f"Searching for: {search_term}")
-    
+        self.load_gallery_data()
+        self.update_status(f"Searching for: {self.search_var.get().strip()}")
+
     def on_gallery_item_double_click(self, event):
-        """Handle double-click on gallery item"""
         selection = self.gallery_tree.selection()
         if selection:
-            item = self.gallery_tree.item(selection[0])
-            filename = item['values'][0]
-            
-            # Switch to decrypt tab and populate
-            self.notebook.select(0)
-            self.operation_var.set("decrypt")
-            self.on_operation_change()
-            self.file_path_var.set(f"[From Gallery] {filename}")
-            self.update_status(f"Selected from gallery: {filename}")
-    
+            item_id = int(selection[0])
+            row = self.load_gallery_row(item_id)
+            if row:
+                self.selected_gallery_id = item_id
+                self.selected_file_path = None
+                self.file_path_var.set(f"[Gallery] {row[1]}")
+                self.notebook.select(0)
+                self.operation_var.set("decrypt")
+                self.on_operation_change()
+                self.update_status(f"Selected from gallery: {row[1]}")
+
     def decrypt_from_gallery(self):
-        """Decrypt selected item from gallery"""
         selection = self.gallery_tree.selection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a file from the gallery first!")
             return
-        
-        item = self.gallery_tree.item(selection[0])
-        filename = item['values'][0]
-        
-        # Switch to decrypt tab
-        self.notebook.select(0)
-        self.operation_var.set("decrypt")
-        self.on_operation_change()
-        self.file_path_var.set(f"[From Gallery] {filename}")
-        self.update_status(f"Ready to decrypt: {filename}")
-    
+        item_id = int(selection[0])
+        row = self.load_gallery_row(item_id)
+        if row:
+            self.selected_gallery_id = item_id
+            self.selected_file_path = None
+            self.file_path_var.set(f"[Gallery] {row[1]}")
+            self.notebook.select(0)
+            self.operation_var.set("decrypt")
+            self.on_operation_change()
+            self.update_status(f"Ready to decrypt: {row[1]}")
+
     def delete_from_gallery(self):
-        """Delete selected item from gallery"""
         selection = self.gallery_tree.selection()
         if not selection:
             messagebox.showwarning("Warning", "Please select a file to delete!")
             return
-        
-        item = self.gallery_tree.item(selection[0])
-        filename = item['values'][0]
-        
+        item_id = int(selection[0])
+        row = self.load_gallery_row(item_id)
+        if not row:
+            messagebox.showerror("Error", "Could not load selected item.")
+            return
+        filename = row[1]
         confirm = messagebox.askyesno(
             "Confirm Delete",
             f"Are you sure you want to delete '{filename}' from the database?\n\nThis action cannot be undone!"
         )
-        
         if confirm:
-            # PLACEHOLDER: Delete from database
-            self.gallery_tree.delete(selection[0])
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM images WHERE id = ?", (item_id,))
+            conn.commit()
+            conn.close()
+            self.refresh_gallery()
             self.update_status(f"Deleted: {filename}")
             messagebox.showinfo("Deleted", f"'{filename}' has been removed from the gallery.")
-    
-    def add_to_gallery_sample(self):
-        """Add newly encrypted file to gallery (sample)"""
-        if self.selected_file_path:
-            filename = os.path.basename(self.selected_file_path)
-            current_time = datetime.now().strftime("%Y-%m-%d %H:%M")
-            
-            # Get file size (placeholder)
-            file_size = "2.5 MB"
-            file_format = filename.split('.')[-1].upper()
-            
-            # Insert into gallery
-            self.gallery_tree.insert(
-                "",
-                0,  # Insert at top
-                values=(filename, file_format, file_size, current_time, "new")
-            )
-    
+
+    def format_file_size(self, size_bytes):
+        if size_bytes is None:
+            return "Unknown"
+        for unit in ["B", "KB", "MB", "GB"]:
+            if size_bytes < 1024.0:
+                return f"{size_bytes:.1f} {unit}"
+            size_bytes /= 1024.0
+        return f"{size_bytes:.1f} TB"
+
     def update_status(self, message):
         """Update status bar message"""
         self.status_bar.config(text=f"Status: {message}")
