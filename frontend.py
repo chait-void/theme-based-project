@@ -690,15 +690,8 @@ class ImageEncryptionApp:
         self.failed_attempts = 0
         self.attempts_label.config(text="")
         self.show_decrypted_preview(decrypted_bytes)
-        
-        # Save decrypted image to user's PC
-        try:
-            saved_path = self.save_decrypted_to_file(decrypted_bytes)
-            messagebox.showinfo("Success", f"Decryption successful!\n\nImage decrypted and saved as:\n{saved_path}")
-            self.update_status("Decryption completed and saved to file system")
-        except Exception as exc:
-            messagebox.showerror("Error", f"Decryption succeeded but failed to save file:\n{exc}")
-            self.update_status("Decryption succeeded but save failed")
+        messagebox.showinfo("Success", "Decryption successful!\n\nImage decrypted.")
+        self.update_status("Decryption completed successfully")
 
     def trigger_lockout(self):
         """Trigger 30-second lockout"""
@@ -802,42 +795,6 @@ class ImageEncryptionApp:
         save_path = os.path.join(os.path.dirname(self.selected_file_path), save_name)
         with open(save_path, "wb") as f:
             f.write(encrypted_bytes)
-        return save_path
-
-    def save_decrypted_to_file(self, decrypted_bytes):
-        """Save decrypted image bytes to a file chosen by the user"""
-        # Determine default filename
-        if self.selected_gallery_id is not None:
-            # From gallery - use original filename without extension
-            row = load_encrypted_image(self.db_path, self.selected_gallery_id)
-            if row:
-                base_name = os.path.splitext(row[1])[0]  # Remove extension from stored filename
-                default_name = f"{base_name}_decrypted.png"
-            else:
-                default_name = "decrypted_image.png"
-        else:
-            # From file - use input filename
-            base_name = os.path.splitext(os.path.basename(self.selected_file_path))[0]
-            if base_name.endswith("_encrypted"):
-                base_name = base_name[:-10]  # Remove "_encrypted" suffix
-            default_name = f"{base_name}_decrypted.png"
-        
-        # Ask user for save location
-        save_path = filedialog.asksaveasfilename(
-            title="Save Decrypted Image",
-            defaultextension=".png",
-            filetypes=[("PNG files", "*.png"), ("JPEG files", "*.jpg"), ("All files", "*.*")],
-            initialfile=default_name
-        )
-        
-        if not save_path:
-            raise Exception("Save cancelled by user")
-        
-        # Save the decrypted bytes as an image
-        stream = io.BytesIO(decrypted_bytes)
-        img = Image.open(stream)
-        img.save(save_path)
-        
         return save_path
 
     def load_gallery_data(self):
